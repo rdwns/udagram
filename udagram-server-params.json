@@ -1,0 +1,30 @@
+[
+	{
+		"ParameterKey": "EnvironmentName",
+		"ParameterValue": "Udagram"
+	},
+	{
+		"ParameterKey": "NetworkStackName",
+		"ParameterValue" : "udagram-network"
+	},
+	{
+		"ParameterKey" : "BastionType",
+		"ParameterValue" : "t2.micro"
+	},
+	{
+		"ParameterKey": "AppServerType",
+		"ParameterValue": "t2.medium"
+	},
+	{
+		"ParameterKey": "BastionAMI",
+		"ParameterValue": "bastion-image"
+	},
+	{
+		"ParameterKey" : "AppAMI",
+		"ParameterValue": "udagram-server-image"
+	},
+	{
+		"ParameterKey": "KeyName",
+		"ParameterValue": "udacity-key"
+	}
+]

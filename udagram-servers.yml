@@ -1,0 +1,250 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: Servers for running and hosting Udagram
+
+Parameters:
+
+  EnvironmentName:
+    Description: An environment name that will be prefixed to resource names
+    Type: String
+    Default: Udagram
+
+  NetworkStackName:
+    Description: Name of the base network stack
+    Type: String
+    Default: udagram-network
+
+  BastionType:
+    Type: String
+    Default: t2.micro
+
+  AppServerType:
+    Type: String
+    Default: t2.medium
+
+  BastionAMI:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: bastion-image
+    Description: AMI ID for deploying Bastion Host
+
+  AppAMI:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: udagram-server-image
+    Description: AMI ID for the Udagram Application Sever
+
+  KeyName:
+    Type: String
+    Default: udacity-key
+
+
+Resources:
+
+  BastionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub Security Group for ${AWS::StackName} Bastion Host
+      VpcId:
+          Fn::ImportValue:
+            !Sub '${EnvironmentName}-VPCID'
+
+  BastionAllowInboundSSHFromInternet:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref BastionSecurityGroup
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      CidrIp: 0.0.0.0/0
+
+  BastionAllowOutboundSSHToApplication:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref BastionSecurityGroup
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      DestinationSecurityGroupId: !Ref ApplicationSecurityGroup
+
+  BastionLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      AssociatePublicIpAddress: true
+      ImageId: !Ref BastionAMI
+      KeyName: !Ref KeyName
+      SecurityGroups:
+        - Ref: BastionSecurityGroup
+      InstanceType: !Ref BastionType
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sdk"
+          Ebs:
+            VolumeSize: 8
+            VolumeType: gp2
+            DeleteOnTermination: true
+
+  BastionLaunchGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+      - Fn::ImportValue:
+          !Sub '${EnvironmentName}-PUB-NETS'
+      LaunchConfigurationName:
+        Ref: BastionLaunchConfig
+      MinSize: '1'
+      MaxSize: '1'
+
+
+  LBSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http to and from load balancer
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+
+  ApplicationSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable SSH from Bastion Host & HTTP from LB
+      VpcId:
+          Fn::ImportValue:
+            !Sub '${EnvironmentName}-VPCID'
+
+  ApplicationAllowInboundSSHFromBastion:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ApplicationSecurityGroup
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      SourceSecurityGroupId: !Ref BastionSecurityGroup
+
+  ApplicationAllowInboundHTTP:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ApplicationSecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      CidrIp: 0.0.0.0/0
+
+  ApplicationLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          sudo su
+          apt-get update -y
+          apt-get install unzip awscli -y
+          apt-get install apache2 -y
+          systemctl start apache2.service
+          cd /var/www/html
+          aws s3 cp s3://rdwn-udagram/udacity.zip .
+          unzip -o udacity.zip
+          systemctl restart apache2.service
+      ImageId: !Ref AppAMI
+      KeyName: !Ref KeyName
+      SecurityGroups:
+        - Ref: ApplicationSecurityGroup
+      InstanceType: !Ref AppServerType
+      IamInstanceProfile: !Ref S3ReadOnlyProfile
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sdk"
+          Ebs:
+            VolumeSize: 10
+            VolumeType: gp2
+            DeleteOnTermination: true
+
+  AppLaunchGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+      - Fn::ImportValue:
+          !Sub '${EnvironmentName}-PRIV-NETS'
+      LaunchConfigurationName:
+        Ref: ApplicationLaunchConfig
+      MinSize: '2'
+      MaxSize: '4'
+      TargetGroupARNs:
+        - !Ref WebAppTargetGroup
+
+  WebAppLB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PUB1-SN"
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PUB2-SN"
+      SecurityGroups:
+      - Ref: LBSecGroup
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn:
+          !Ref WebAppTargetGroup
+      LoadBalancerArn:
+        !Ref WebAppLB
+      Port: 80
+      Protocol: HTTP
+
+  ALBListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref WebAppTargetGroup
+      Conditions:
+        - Field: path-pattern
+          Values: [/]
+      ListenerArn: !Ref Listener
+      Priority: 1
+
+  WebAppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 8
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${EnvironmentName}-VPCID"
+
+  S3ReadOnlyProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - udagram-s3-readonly
+
+Outputs:
+
+  WebAppLoadBalancerDNSName:
+    Description: DNS name or Public URL of the Load Balancer
+    Value: !Join [ "", [ 'http://', !GetAtt WebAppLB.DNSName ]]
+    Export:
+      Name: !Sub ${EnvironmentName}-LB-DNSName
+
+
+
+
+
+
+
+
